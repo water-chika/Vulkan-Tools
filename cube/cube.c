@@ -454,6 +454,10 @@ struct demo {
     screen_event_t screen_event;
 #endif
     WSI_PLATFORM wsi_platform;
+#if defined(VK_USE_PLATFORM_DISPLAY_KHR)
+    char* display_name;
+    VkDisplayKHR display;
+#endif
     VkSurfaceKHR surface;
     bool prepared;
     bool use_staging_buffer;
@@ -3141,10 +3145,8 @@ static void demo_run(struct demo *demo) {
 #if defined(VK_USE_PLATFORM_DISPLAY_KHR)
 static VkResult demo_create_display_surface(struct demo *demo) {
     VkResult U_ASSERT_ONLY err;
-    uint32_t display_count;
     uint32_t mode_count;
     uint32_t plane_count;
-    VkDisplayPropertiesKHR display_props;
     VkDisplayKHR display;
     VkDisplayModePropertiesKHR mode_props;
     VkDisplayPlanePropertiesKHR *plane_props;
@@ -3153,12 +3155,7 @@ static VkResult demo_create_display_surface(struct demo *demo) {
     VkExtent2D image_extent;
     VkDisplaySurfaceCreateInfoKHR create_info;
 
-    // Get the first display
-    display_count = 1;
-    err = vkGetPhysicalDeviceDisplayPropertiesKHR(demo->gpu, &display_count, &display_props);
-    assert(!err || (err == VK_INCOMPLETE));
-
-    display = display_props.display;
+    display = demo->display;
 
     // Get the first mode of the display
     err = vkGetDisplayModePropertiesKHR(demo->gpu, display, &mode_count, NULL);
@@ -3466,27 +3463,35 @@ static VkBool32 demo_check_layers(uint32_t check_count, char **check_names, uint
     return 1;
 }
 #if defined(VK_USE_PLATFORM_DISPLAY_KHR)
-int find_display_gpu(int gpu_number, uint32_t gpu_count, VkPhysicalDevice *physical_devices) {
+int find_display_gpu(char* display_name, uint32_t gpu_count, VkPhysicalDevice *physical_devices, VkDisplayKHR* display_ptr) {
     uint32_t display_count = 0;
     VkResult U_ASSERT_ONLY result;
-    int gpu_return = gpu_number;
-    if (gpu_number >= 0) {
-        result = vkGetPhysicalDeviceDisplayPropertiesKHR(physical_devices[gpu_number], &display_count, NULL);
+    int gpu_return = -1;
+    bool find_it = false;
+    for (uint32_t i = 0; i < gpu_count; i++) {
+        result = vkGetPhysicalDeviceDisplayPropertiesKHR(physical_devices[i], &display_count, NULL);
         assert(!result);
-    } else {
-        for (uint32_t i = 0; i < gpu_count; i++) {
-            result = vkGetPhysicalDeviceDisplayPropertiesKHR(physical_devices[i], &display_count, NULL);
-            assert(!result);
-            if (display_count) {
-                gpu_return = i;
-                break;
+        VkDisplayPropertiesKHR* display_props =
+            malloc(display_count * sizeof(display_props[0]));
+        if (display_props) {
+            result = vkGetPhysicalDeviceDisplayPropertiesKHR(physical_devices[i], &display_count, display_props);
+            if (result == VK_SUCCESS) {
+                for (uint32_t j = 0; j < display_count; j++) {
+                    if (display_name==NULL || strcmp(display_name, display_props[j].displayName)) {
+                        *display_ptr = display_props[j].display;
+                        gpu_return = i;
+                        find_it = true;
+                        break;
+                    }
+                }
             }
+            free(display_props);
+        }
+        if (find_it) {
+            break;
         }
     }
-    if (display_count > 0)
-        return gpu_return;
-    else
-        return -1;
+    return gpu_return;
 }
 #endif
 
@@ -4170,7 +4175,15 @@ static void demo_select_physical_device(struct demo *demo) {
 
     if (demo->wsi_platform == WSI_PLATFORM_DISPLAY) {
 #if defined(VK_USE_PLATFORM_DISPLAY_KHR)
-        demo->gpu_number = find_display_gpu(demo->gpu_number, gpu_count, physical_devices);
+        demo->display = VK_NULL_HANDLE;
+        uint32_t gpu_number = find_display_gpu(demo->display_name, gpu_count, physical_devices, &demo->display);
+        if (demo->display == VK_NULL_HANDLE) {
+            fprintf(stderr, "find display failed\n");
+            exit(1);
+        }
+        if (demo->gpu_number == -1) {
+            demo->gpu_number = gpu_number;
+        }
         if (demo->gpu_number < 0) {
             printf("Cannot find any display!\n");
             fflush(stdout);
@@ -4730,6 +4743,11 @@ static void demo_init(struct demo *demo, int argc, char **argv) {
             i++;
             continue;
         }
+        if ((strcmp(argv[i], "--display_name") == 0) && (i < argc - 1)) {
+            demo->display_name = argv[i + 1];
+            i++;
+            continue;
+        }
 #if defined(ANDROID)
         ERR_EXIT("Usage: vkcube [--validate]\n", "Usage");
 #else
@@ -4800,6 +4818,7 @@ static void demo_init(struct demo *demo, int argc, char **argv) {
             "\t[--width <width>] [--height <height>]\n"
             "\t[--force_errors]\n"
             "\t[--wsi <%s>]\n"
+            "\t[--display_name <display_name>](only used when wsi is display)\n"
             "\t<present_mode_enum>\n"
             "\t\tVK_PRESENT_MODE_IMMEDIATE_KHR = %d\n"
             "\t\tVK_PRESENT_MODE_MAILBOX_KHR = %d\n"

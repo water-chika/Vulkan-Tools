@@ -439,6 +439,10 @@ struct Demo {
     screen_event_t screen_event = nullptr;
 #endif
     WsiPlatform wsi_platform = WsiPlatform::auto_;
+#if defined(VK_USE_PLATFORM_DISPLAY_KHR)
+    std::string display_name;
+    VkDisplayKHR display;
+#endif
     vk::SurfaceKHR surface;
     bool prepared = false;
     bool use_staging_buffer = false;
@@ -1079,6 +1083,13 @@ void Demo::init(int argc, char **argv) {
             i++;
             continue;
         }
+#if defined(VK_USE_PLATFORM_DISPLAY_KHR)
+        if ((strcmp(argv[i], "--display_name") == 0) && (i < argc - 1)) {
+            display_name = argv[i + 1];
+            i++;
+            continue;
+        }
+#endif
 
         std::string wsi_platforms;
 #if defined(VK_USE_PLATFORM_XCB_KHR)
@@ -1124,6 +1135,7 @@ void Demo::init(int argc, char **argv) {
               << "\t[--width <width>] [--height <height>]\n"
               << "\t[--force_errors]\n"
               << "\t[--wsi <" << wsi_platforms << ">]\n"
+              << "\t[--display_name <display_name>](only used when wsi is display)\n"
               << "\t<present_mode_enum>\n"
               << "\t\tVK_PRESENT_MODE_IMMEDIATE_KHR = " << VK_PRESENT_MODE_IMMEDIATE_KHR << "\n"
               << "\t\tVK_PRESENT_MODE_MAILBOX_KHR = " << VK_PRESENT_MODE_MAILBOX_KHR << "\n"
@@ -1329,28 +1341,27 @@ void Demo::check_and_set_wsi_platform() {
 #endif
 }
 #if defined(VK_USE_PLATFORM_DISPLAY_KHR)
-int find_display_gpu(int gpu_number, const std::vector<vk::PhysicalDevice> &physical_devices) {
-    uint32_t display_count = 0;
-    int gpu_return = gpu_number;
-    if (gpu_number >= 0) {
-        auto display_props_return = physical_devices[gpu_number].getDisplayPropertiesKHR();
+std::pair<VkDisplayKHR, int> find_display_gpu(std::string display_name, const std::vector<vk::PhysicalDevice> &physical_devices) {
+    int gpu_return = -1;
+    VkDisplayKHR display = nullptr;
+    for (uint32_t i = 0; i < physical_devices.size(); i++) {
+        auto display_props_return = physical_devices[i].getDisplayPropertiesKHR();
         VERIFY(display_props_return.result == vk::Result::eSuccess);
-        display_count = static_cast<uint32_t>(display_props_return.value.size());
-    } else {
-        for (uint32_t i = 0; i < physical_devices.size(); i++) {
-            auto display_props_return = physical_devices[i].getDisplayPropertiesKHR();
-            VERIFY(display_props_return.result == vk::Result::eSuccess);
-            if (display_props_return.value.size() > 0) {
-                display_count = static_cast<uint32_t>(display_props_return.value.size());
+        auto display_props = display_props_return.value;
+        bool find_it = false;
+        for (auto& display_prop : display_props) {
+            if (display_name == "" || display_name == display_prop.displayName) {
+                display = display_prop.display;
                 gpu_return = i;
+                find_it = true;
                 break;
             }
         }
+        if (find_it) {
+            break;
+        }
     }
-    if (display_count > 0)
-        return gpu_return;
-    else
-        return -1;
+    return {display, gpu_return};
 }
 #endif
 VKAPI_ATTR VkBool32 VKAPI_CALL Demo::debug_messenger_callback(VkDebugUtilsMessageSeverityFlagBitsEXT messageSeverity,
@@ -1724,7 +1735,14 @@ void Demo::select_physical_device() {
 
     if (wsi_platform == WsiPlatform::display) {
 #if defined(VK_USE_PLATFORM_DISPLAY_KHR)
-        gpu_number = find_display_gpu(gpu_number, physical_devices);
+        auto [display_, gpu_number_] = find_display_gpu(display_name, physical_devices);
+        display = display_;
+        if (display == nullptr) {
+            fprintf(stderr, "find display failed!\n");
+            exit(1);
+        }
+        if (gpu_number == -1)
+            gpu_number = gpu_number_;
         if (gpu_number < 0) {
             printf("Cannot find any display!\n");
             fflush(stdout);
@@ -3367,12 +3385,6 @@ void Demo::run() {
 #if defined(VK_USE_PLATFORM_DISPLAY_KHR)
 
 vk::Result Demo::create_display_surface() {
-    auto display_properties_return = gpu.getDisplayPropertiesKHR();
-    VERIFY((display_properties_return.result == vk::Result::eSuccess) ||
-           (display_properties_return.result == vk::Result::eIncomplete));
-
-    auto display = display_properties_return.value.at(0).display;
-
     auto display_mode_props_return = gpu.getDisplayModePropertiesKHR(display);
     VERIFY(display_mode_props_return.result == vk::Result::eSuccess);
 
